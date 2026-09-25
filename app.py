@@ -2,7 +2,7 @@
 Swingtrade Dashboard & Multi-Ticker Scanner (1-5 dagen horizon)
 ===============================================================
 - Interactive Multi-Ticker Scanner Cards
-- Options Chain Metrics (Call/Put Ratio, Volume & Implied Volatility)
+- Detailed Options Chain Metrics (Put/Call Ratio, Volume, Open Interest & Implied Volatility)
 - Short Selling / Short Float Analysis
 - Dynamic Support & Resistance Levels
 - Machine Learning (XGBoost/RF) & NLP Sentiment Analysis
@@ -65,7 +65,7 @@ def colored_box(label, value, color, sub=""):
 
 
 # ---------------------------------------------------------------------------
-# DATA ENGINE (YFINANCE, HERSTELDE OPTIONS & NIEUWS RSS FALLBACK)
+# DATA ENGINE (YFINANCE, GEÏNTEGREERDE OPTIONS CHAIN & NIEUWS RSS FALLBACK)
 # ---------------------------------------------------------------------------
 @st.cache_data(ttl=300)
 def get_daily_data(ticker, period="1y"):
@@ -79,9 +79,13 @@ def get_daily_data(ticker, period="1y"):
 
 @st.cache_data(ttl=600)
 def get_ticker_info_and_options(ticker):
-    """Robuuste verwerking van Opties & Short Interest met meervoudige checks."""
+    """
+    Volledig geïntegreerde verwerking van Opties Chain Metrics & Short Interest.
+    Verwerkt Call/Put volume, Open Interest, Implied Volatility en Put/Call ratios.
+    """
     short_percent, short_ratio = 0.0, 0.0
-    calls_vol, puts_vol = 0, 0
+    total_call_vol, total_put_vol = 0, 0
+    total_call_oi, total_put_oi = 0, 0
     iv_list = []
 
     try:
@@ -91,9 +95,10 @@ def get_ticker_info_and_options(ticker):
         short_percent = info.get("shortPercentOfFloat", 0) or 0
         short_ratio = info.get("shortRatio", 0) or 0
 
-        # Probeer opties op te halen uit de eerstvolgende 3 expiraties
-        expirations = t.expirations
+        # Ophalen optie-expiratiedata
+        expirations = t.options
         if expirations:
+            # Analyseer de eerste 3 nabijgelegen expiraties voor swingtrade relevantie
             for exp in expirations[:3]:
                 try:
                     opt = t.option_chain(exp)
@@ -102,32 +107,36 @@ def get_ticker_info_and_options(ticker):
 
                     if c_df is not None and not c_df.empty:
                         c_vol = pd.to_numeric(c_df["volume"], errors="coerce").fillna(0).sum()
-                        calls_vol += c_vol
+                        c_oi = pd.to_numeric(c_df["openInterest"], errors="coerce").fillna(0).sum()
+                        total_call_vol += c_vol
+                        total_call_oi += c_oi
+
                         c_iv = pd.to_numeric(c_df["impliedVolatility"], errors="coerce").dropna().mean()
                         if pd.notna(c_iv) and c_iv > 0:
                             iv_list.append(c_iv)
 
                     if p_df is not None and not p_df.empty:
                         p_vol = pd.to_numeric(p_df["volume"], errors="coerce").fillna(0).sum()
-                        puts_vol += p_vol
+                        p_oi = pd.to_numeric(p_df["openInterest"], errors="coerce").fillna(0).sum()
+                        total_put_vol += p_vol
+                        total_put_oi += p_oi
+
                         p_iv = pd.to_numeric(p_df["impliedVolatility"], errors="coerce").dropna().mean()
                         if pd.notna(p_iv) and p_iv > 0:
                             iv_list.append(p_iv)
 
-                    if calls_vol > 0 or puts_vol > 0:
-                        break
                 except Exception:
                     continue
     except Exception:
         pass
 
-    # Call / Put Ratio
-    if puts_vol > 0:
-        cp_ratio = round(calls_vol / puts_vol, 2)
-    elif calls_vol > 0:
-        cp_ratio = 2.0
-    else:
-        cp_ratio = 1.0
+    # Berekening Ratios & Metrics
+    # Put/Call Ratio op basis van volume
+    pc_ratio_vol = round(total_put_vol / total_call_vol, 2) if total_call_vol > 0 else 1.0
+    # Call/Put Ratio (voor algemene bullish/bearish score)
+    cp_ratio = round(total_call_vol / total_put_vol, 2) if total_put_vol > 0 else (2.0 if total_call_vol > 0 else 1.0)
+    # Put/Call Ratio op basis van Open Interest
+    pc_ratio_oi = round(total_put_oi / total_call_oi, 2) if total_call_oi > 0 else 1.0
 
     avg_iv = round(float(np.mean(iv_list)) * 100, 1) if iv_list else 0.0
 
@@ -135,9 +144,13 @@ def get_ticker_info_and_options(ticker):
         "short_percent": round(short_percent * 100, 2),
         "short_ratio": round(short_ratio, 1),
         "cp_ratio": cp_ratio,
+        "pc_ratio_vol": pc_ratio_vol,
+        "pc_ratio_oi": pc_ratio_oi,
         "avg_iv": avg_iv,
-        "calls_vol": int(calls_vol),
-        "puts_vol": int(puts_vol),
+        "calls_vol": int(total_call_vol),
+        "puts_vol": int(total_put_vol),
+        "calls_oi": int(total_call_oi),
+        "puts_oi": int(total_put_oi),
     }
 
 
@@ -146,7 +159,7 @@ def get_ai_vader_sentiment(ticker):
     """Herstelde Sentiment Engine met Directe Yahoo Finance RSS Feed Fallback."""
     titles = []
 
-    # Method 1: yfinance news API (ondersteunt nieuw & oud formaat)
+    # Method 1: yfinance news API
     try:
         t = yf.Ticker(ticker)
         news_items = t.news or []
@@ -158,7 +171,7 @@ def get_ai_vader_sentiment(ticker):
     except Exception:
         pass
 
-    # Method 2: Fallback via Yahoo Finance RSS Feed (wanneer t.news faalt)
+    # Method 2: Fallback via Yahoo Finance RSS Feed
     if not titles:
         try:
             url = f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={ticker}&region=US&lang=en-US"
@@ -177,7 +190,7 @@ def get_ai_vader_sentiment(ticker):
     if not titles:
         return 5.0, "Geen recente koppen"
 
-    # VADER sentiment berekening op de gevonden koppen
+    # VADER sentiment berekening
     scores = [sia.polarity_scores(t)["compound"] for t in titles[:10]]
     avg_compound = float(np.mean(scores))
     ai_score = round((avg_compound + 1) * 4.5 + 1, 1)
@@ -314,6 +327,7 @@ def compute_stock_analysis(t_code):
         "Resistance": f"${resistance:.2f}" if resistance else "N/A",
         "Short Float": f"{opt_short['short_percent']}%",
         "Call/Put": opt_short["cp_ratio"],
+        "P/C Vol": opt_short["pc_ratio_vol"],
         "IV": f"{opt_short['avg_iv']}%",
         "Details": " · ".join(reasons),
         "df": df,
@@ -349,7 +363,7 @@ with col_btn:
 ticker = st.session_state.selected_ticker
 
 if ticker:
-    with st.spinner(f"Opties, Short Interest & AI Modellen berekenen voor {ticker}..."):
+    with st.spinner(f"Opties Chain, Short Interest & AI Modellen berekenen voor {ticker}..."):
         res = compute_stock_analysis(ticker)
 
     if res:
@@ -383,21 +397,25 @@ if ticker:
         with c3:
             colored_box("Resistance Level (Key High)", res["Resistance"], RED, "Belangrijkste weerstandszone")
 
-        # ---- RIJ 2: OPTIONS & SHORT SELLING ANALYSE -------------------------
-        st.markdown("### ⚡ Options & Short Selling Metrics")
+        # ---- RIJ 2: OPTIONS CHAIN & SHORT SELLING ANALYSE -------------------
+        st.markdown("### ⚡ Options Chain & Short Selling Metrics")
         o1, o2, o3, o4 = st.columns(4)
         with o1:
             cp_ratio = opt["cp_ratio"]
             cp_color = GREEN if cp_ratio > 1.2 else (RED if cp_ratio < 0.8 else ORANGE)
-            subtext = f"Calls: {opt.get('calls_vol',0):,} | Puts: {opt.get('puts_vol',0):,}"
+            subtext = f"Calls Vol: {opt.get('calls_vol',0):,} | Puts Vol: {opt.get('puts_vol',0):,}"
             colored_box("Call / Put Volume Ratio", f"{cp_ratio}", cp_color, subtext)
         with o2:
-            colored_box("Implied Volatility (IV)", f"{opt['avg_iv']}%", GRAY, "Verwachte 30-dagen volatiliteit")
+            pc_vol = opt["pc_ratio_vol"]
+            pc_color = GREEN if pc_vol < 0.8 else (RED if pc_vol > 1.2 else ORANGE)
+            subtext_oi = f"P/C Open Int Ratio: {opt.get('pc_ratio_oi', 1.0)}"
+            colored_box("Put / Call Ratio (Volume)", f"{pc_vol}", pc_color, subtext_oi)
         with o3:
-            short_color = RED if opt["short_percent"] > 15.0 else ORANGE
-            colored_box("Short Float %", f"{opt['short_percent']}%", short_color, "> 15% = Potential Squeeze")
+            colored_box("Implied Volatility (IV)", f"{opt['avg_iv']}%", GRAY, "Gemiddelde IV over nabije opties")
         with o4:
-            colored_box("Days to Cover (Short Ratio)", f"{opt['short_ratio']} Dagen", GRAY, "Tijd nodig om shorts te sluiten")
+            short_color = RED if opt["short_percent"] > 15.0 else ORANGE
+            subtext_dtc = f"Days to Cover: {opt['short_ratio']} dagen"
+            colored_box("Short Float %", f"{opt['short_percent']}%", short_color, subtext_dtc)
 
         st.markdown("---")
 
@@ -447,7 +465,7 @@ if ticker:
 # ---------------------------------------------------------------------------
 st.markdown("---")
 st.subheader("🔍 Multi-Ticker Live Scanner")
-st.caption("Scan meerdere aandelen tegelijk op AI Modellen, Levels, Options & Short Interest.")
+st.caption("Scan meerdere aandelen tegelijk op AI Modellen, Levels, Options Chain & Short Interest.")
 
 default_tickers = "AAPL, TSLA, NVDA, MSFT, AMD, AMZN, GOOGL, META, PLTR"
 scan_input = st.text_area("Voer tickers in (gescheiden door komma's):", value=default_tickers, height=70)
@@ -458,7 +476,7 @@ if scan_btn and scan_input:
     tickers_to_scan = [t.strip().upper() for t in scan_input.split(",") if t.strip()]
 
     if tickers_to_scan:
-        st.info(f"Bezig met berekenen van alle AI Modellen & Data voor {len(tickers_to_scan)} aandelen...")
+        st.info(f"Bezig met berekenen van alle AI Modellen & Options Data voor {len(tickers_to_scan)} aandelen...")
         progress_bar = st.progress(0)
         results = []
 
@@ -490,7 +508,7 @@ if "scan_results" in st.session_state:
         col_score.markdown(f"**Score: {row['Totaal Score']}**")
         col_ml.markdown(f"🤖 **{row['ML Kans']}**")
         col_levels.markdown(f"<small>Sup: {row['Support']}<br>Res: {row['Resistance']}</small>", unsafe_allow_html=True)
-        col_opt.markdown(f"<small>Short: {row['Short Float']}<br>C/P: {row['Call/Put']}</small>", unsafe_allow_html=True)
+        col_opt.markdown(f"<small>Short: {row['Short Float']}<br>P/C Vol: {row['P/C Vol']}</small>", unsafe_allow_html=True)
 
         if col_act.button(f"📊 Analyseer {row['Ticker']}", key=f"btn_{row['Ticker']}_{idx}"):
             st.session_state.selected_ticker = row["Ticker"]
