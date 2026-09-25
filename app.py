@@ -8,9 +8,11 @@ Swingtrade Dashboard & Multi-Ticker Scanner (1-5 dagen horizon)
 - Machine Learning (XGBoost/RF) & NLP Sentiment Analysis
 - Volume Analysis (10-day Avg Volume)
 - Single Candle (1D) & 3-Day Candle Pattern Recognition
+- Live MarketBeat Analyst Ratings & Sentiment Scraper
 """
 
 import concurrent.futures
+import re
 import xml.etree.ElementTree as ET
 import numpy as np
 import pandas as pd
@@ -18,6 +20,7 @@ import plotly.graph_objects as go
 import requests
 import streamlit as st
 import yfinance as yf
+from bs4 import BeautifulSoup
 
 # Importeer NLTK VADER voor AI Sentiment Analysis
 import nltk
@@ -25,6 +28,10 @@ from nltk.sentiment.vader import SentimentIntensityAnalyzer
 
 # Importeer Scikit-learn Classifier voor AI ML Score
 from sklearn.ensemble import RandomForestClassifier
+
+# Importeer Rich voor Terminal Output
+from rich.console import Console
+from rich.table import Table
 
 
 @st.cache_resource
@@ -64,6 +71,151 @@ def colored_box(label, value, color, sub=""):
         """,
         unsafe_allow_html=True,
     )
+
+
+# ---------------------------------------------------------------------------
+# MARKETBEAT RATINGS SCRAPER & TERMINAL DISPLAY
+# ---------------------------------------------------------------------------
+@st.cache_data(ttl=1800)
+def fetch_marketbeat_ratings():
+    """
+    Haalt de nieuwste analistenratings op van MarketBeat.com
+    en categoriseert deze op sentiment en kleur.
+    """
+    url = "https://www.marketbeat.com/ratings/"
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/115.0.0.0 Safari/537.36"
+        )
+    }
+
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+    except Exception as e:
+        print(f"Fout bij ophalen van data: {e}")
+        return pd.DataFrame()
+
+    soup = BeautifulSoup(response.text, "html.parser")
+    
+    # Zoek de primaire tabel met analistenratings
+    table = soup.find("table", {"id": "reasons-table"}) or soup.find("table")
+    if not table:
+        print("Geen ratingtabel gevonden op de pagina.")
+        return pd.DataFrame()
+
+    ratings_data = []
+
+    # Loop door de rijen van de tabel
+    rows = table.find_all("tr")
+    for row in rows:
+        cells = row.find_all(["td", "th"])
+        if len(cells) < 4:
+            continue
+
+        text_cells = [cell.get_text(strip=True) for cell in cells]
+        
+        # Sla headerrijen over
+        if "Ticker" in text_cells[0] or "Action" in text_cells[1]:
+            continue
+
+        # Typische kolomopbouw: Ticker/Bedrijf, Analist/Bank, Actie, Advies/Target
+        ticker_info = text_cells[0]
+        analyst_firm = text_cells[1] if len(text_cells) > 1 else ""
+        action = text_cells[2] if len(text_cells) > 2 else ""
+        details = text_cells[3] if len(text_cells) > 3 else ""
+
+        # Bepaal Ticker-code met regex (bijv. AAPL uit "Apple AAPL")
+        ticker_match = re.search(r'\b[A-Z]{1,5}\b', ticker_info)
+        ticker = ticker_match.group(0) if ticker_match else ticker_info[:6]
+
+        # Sentiment & Kleur logica
+        action_lower = action.lower()
+        if any(keyword in action_lower for keyword in ["upgrade", "raised", "buy", "outperform", "positive"]):
+            sentiment = "Bullish"
+            color = "green"
+            icon = "🟢"
+        elif any(keyword in action_lower for keyword in ["downgrade", "lowered", "sell", "underperform", "negative"]):
+            sentiment = "Bearish"
+            color = "red"
+            icon = "🔴"
+        else:
+            sentiment = "Neutraal"
+            color = "yellow"
+            icon = "🟡"
+
+        ratings_data.append({
+            "Icon": icon,
+            "Ticker": ticker,
+            "Analyst": analyst_firm,
+            "Action": action,
+            "Details": details,
+            "Sentiment": sentiment,
+            "Color": color
+        })
+
+    return pd.DataFrame(ratings_data)
+
+
+def display_terminal_dashboard(df):
+    """
+    Rendert de data netjes in de terminal met kleurcodes (via Rich).
+    """
+    if df.empty:
+        print("Geen data beschikbaar om te tonen.")
+        return
+
+    console = Console()
+    table = Table(title="📊 MarketBeat - Recente Analisten Upgrades & Downgrades")
+
+    table.add_column("S", justify="center")
+    table.add_column("Ticker", style="bold white")
+    table.add_column("Analist / Bank", style="cyan")
+    table.add_column("Actie", style="bold")
+    table.add_column("Details / Target", style="white")
+    table.add_column("Sentiment", justify="center")
+
+    for _, row in df.iterrows():
+        # Geef de hele rij of specifieke kolom een kleur
+        style_color = row["Color"]
+        table.add_row(
+            row["Icon"],
+            row["Ticker"],
+            row["Analyst"],
+            f"[{style_color}]{row['Action']}[/{style_color}]",
+            row["Details"],
+            f"[{style_color}]{row['Sentiment']}[/{style_color}]"
+        )
+
+    console.print(table)
+
+
+def render_streamlit_widget(df):
+    """
+    Rendert de MarketBeat data op het Streamlit Dashboard.
+    """
+    st.subheader("📊 Recente Analisten Rating Aanpassingen (MarketBeat)")
+
+    if df.empty:
+        st.info("Geen recente MarketBeat analisten ratings beschikbaar.")
+        return
+
+    def color_sentiment(val):
+        if val == "Bullish":
+            return "background-color: #d4edda; color: #155724; font-weight: bold;"
+        elif val == "Bearish":
+            return "background-color: #f8d7da; color: #721c24; font-weight: bold;"
+        else:
+            return "background-color: #fff3cd; color: #856404; font-weight: bold;"
+
+    # Styling toepassen op het dataframe
+    styled_df = df[["Icon", "Ticker", "Analyst", "Action", "Details", "Sentiment"]].style.map(
+        color_sentiment, subset=["Sentiment"]
+    )
+    
+    st.dataframe(styled_df, use_container_width=True)
 
 
 # ---------------------------------------------------------------------------
@@ -424,6 +576,12 @@ def compute_stock_analysis(t_code):
 st.title("📊 Swingtrade Dashboard & Scanner (1-5 dagen)")
 st.caption("Includes Options Chain, Short Float, Support & Resistance, Volume & Candle Analysis, AI ML & NLP Models.")
 
+# MarketBeat Ratings tonen op het Dashboard
+df_ratings = fetch_marketbeat_ratings()
+render_streamlit_widget(df_ratings)
+
+st.markdown("---")
+
 col_input, col_btn = st.columns([3, 1])
 with col_input:
     ticker_input = (
@@ -613,3 +771,9 @@ if "scan_results" in st.session_state:
             st.rerun()
 
         st.markdown("<hr style='margin: 4px 0px; border-top: 1px solid #eee;'>", unsafe_allow_html=True)
+
+
+if __name__ == "__main__":
+    # Optionele test-uitvoering voor terminalmodus
+    df_ratings_terminal = fetch_marketbeat_ratings()
+    display_terminal_dashboard(df_ratings_terminal)
