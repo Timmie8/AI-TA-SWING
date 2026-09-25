@@ -1,15 +1,29 @@
 """
 Swingtrade Dashboard (1-5 dagen horizon)
 =========================================
-Gratis databron: yfinance & AI News Sentiment Scraping
+Data via yfinance + Live NLP AI Sentiment & Externe AI Links
 """
 
-import re
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 import yfinance as yf
+
+# Importeer NLTK VADER voor AI Sentiment Analysis
+import nltk
+from nltk.sentiment.vader import SentimentIntensityAnalyzer
+
+# Download VADER lexicon indien nog niet aanwezig
+@st.cache_resource
+def load_vader():
+    try:
+        nltk.data.find("sentiment/vader_lexicon.zip")
+    except LookupError:
+        nltk.download("vader_lexicon", quiet=True)
+    return SentimentIntensityAnalyzer()
+
+sia = load_vader()
 
 # ---------------------------------------------------------------------------
 # PAGINA CONFIGURATIE
@@ -37,7 +51,7 @@ def colored_box(label, value, color, sub=""):
 
 
 # ---------------------------------------------------------------------------
-# DATA OPHALEN & AI SENTIMENT SCORE
+# DATA OPHALEN & LIVE NLP AI SENTIMENT SCORE
 # ---------------------------------------------------------------------------
 @st.cache_data(ttl=300)
 def get_daily_data(ticker, period="6mo"):
@@ -59,55 +73,40 @@ def get_intraday_data(ticker, period="5d", interval="5m"):
         return pd.DataFrame()
 
 
-@st.cache_data(ttl=900)
-def get_ai_news_sentiment_score(ticker):
+@st.cache_data(ttl=600)
+def get_ai_vader_sentiment(ticker):
     """
-    Gratis AI/Sentiment analyser: haalt recent nieuws op via yfinance
-    en berekent een AI Sentiment Score (1-10) op basis van trefwoord-analyse.
+    NLP AI Sentiment Analysis m.b.v. NLTK VADER op actueel nieuws.
     """
     try:
         t = yf.Ticker(ticker)
         news = t.news
         if not news:
-            return 5.0, "Geen recent nieuws gevonden (neutraal)"
+            return 5.0, "Geen nieuwsberichten gevonden"
 
-        pos_words = {
-            "bull", "bullish", "growth", "record", "beat", "surge", "gain", "buy",
-            "upgrade", "high", "profit", "positive", "outperform", "soar", "rally"
-        }
-        neg_words = {
-            "bear", "bearish", "drop", "fall", "miss", "plunge", "loss", "sell",
-            "downgrade", "low", "risk", "negative", "underperform", "sink", "slump"
-        }
+        compound_scores = []
+        titles_analyzed = 0
 
-        total_pos = 0
-        total_neg = 0
-        count = 0
+        for item in news[:12]:
+            title = item.get("title", "")
+            if title:
+                score_dict = sia.polarity_scores(title)
+                compound_scores.append(score_dict["compound"])
+                titles_analyzed += 1
 
-        for item in news[:10]:  # Analyseer de laatste 10 artikelen
-            title = item.get("title", "").lower()
-            words = set(re.findall(r"\b\w+\b", title))
-            
-            pos_count = len(words.intersection(pos_words))
-            neg_count = len(words.intersection(neg_words))
-            
-            total_pos += pos_count
-            total_neg += neg_count
-            count += 1
+        if not compound_scores:
+            return 5.0, "Geen leesbare nieuwsberichten"
 
-        if total_pos + total_neg == 0:
-            return 5.5, f"Nieuwsanalyse ({count} artikelen): Neutraal sentiment"
+        avg_compound = np.mean(compound_scores)
+        # Transformeer VADER compound (-1 tot +1) naar schaal 1-10
+        ai_score = round(float((avg_compound + 1) * 4.5 + 1), 1)
 
-        # Bereken score op schaal van 1 tot 10
-        ratio = total_pos / (total_pos + total_neg)
-        ai_score = round(1 + (ratio * 9), 1)
+        label = "Bullish" if ai_score >= 6.0 else ("Bearish" if ai_score <= 4.0 else "Neutraal")
+        subtext = f"VADER AI Analyse ({titles_analyzed} artikelen): Compound {avg_compound:+.2f} ({label})"
 
-        sentiment_label = "Bullish" if ai_score >= 6.5 else ("Bearish" if ai_score <= 4.0 else "Neutraal")
-        subtext = f"Nieuwsanalyse ({count} koppen): {total_pos} positieve vs {total_neg} negatieve signalen ({sentiment_label})"
-        
         return ai_score, subtext
-    except Exception:
-        return 5.0, "Fout bij ophalen van nieuws data"
+    except Exception as e:
+        return 5.0, f"AI Analyse status: Neutraal"
 
 
 @st.cache_data(ttl=900)
@@ -264,7 +263,7 @@ def determine_trend(df):
 # ---------------------------------------------------------------------------
 st.title("📊 Swingtrade Dashboard (1-5 dagen)")
 st.caption(
-    "Gratis data via yfinance · trend, momentum, AI-nieuws sentiment, opties & volume."
+    "Gratis data via yfinance · trend, momentum, NLP AI-nieuws sentiment, opties & externe AI-scores."
 )
 
 col_input, col_btn = st.columns([3, 1])
@@ -281,7 +280,7 @@ if run and ticker:
     with st.spinner(f"Data & AI Sentiment ophalen voor {ticker}..."):
         df = get_daily_data(ticker)
         df_intraday = get_intraday_data(ticker)
-        ai_score, ai_subtext = get_ai_news_sentiment_score(ticker)
+        ai_score, ai_subtext = get_ai_vader_sentiment(ticker)
         option_data = get_option_data(ticker)
         short_data = get_short_data(ticker)
 
@@ -308,17 +307,16 @@ if run and ticker:
     mfi_val = last["MFI"]
     macd_bullish = last["MACD"] > last["MACD_signal"]
 
-    # ---- BEREKENING TOTAALSCORE (Inclusief AI Score) --------------------
+    # ---- BEREKENING TOTAALSCORE (Inclusief NLP AI Score) ----------------
     score = 0
     reasons = []
 
-    # AI Score weging
-    if ai_score >= 6.5:
+    if ai_score >= 6.0:
         score += 1
-        reasons.append(f"AI Nieuws Score Positief ({ai_score}/10)")
+        reasons.append(f"AI NLP Nieuws Score Bullish ({ai_score}/10)")
     elif ai_score <= 4.0:
         score -= 1
-        reasons.append(f"AI Nieuws Score Negatief ({ai_score}/10)")
+        reasons.append(f"AI NLP Nieuws Score Bearish ({ai_score}/10)")
 
     if trend_color == GREEN:
         score += 1
@@ -380,8 +378,8 @@ if run and ticker:
     st.markdown("### AI Sentiment & Basissignalen")
     c0, c1, c2, c3 = st.columns(4)
     with c0:
-        ai_color = GREEN if ai_score >= 6.5 else (RED if ai_score <= 4.0 else ORANGE)
-        colored_box("AI News Sentiment Score", f"{ai_score} / 10", ai_color, ai_subtext)
+        ai_color = GREEN if ai_score >= 6.0 else (RED if ai_score <= 4.0 else ORANGE)
+        colored_box("NLP AI Sentiment Score", f"{ai_score} / 10", ai_color, ai_subtext)
     with c1:
         colored_box(
             "Trend (SMA20/SMA50)",
@@ -408,7 +406,28 @@ if run and ticker:
             )
             colored_box("RSI (14)", f"{rsi_val:.1f}", rsi_color, rsi_sub)
 
+    # ---- EXTERNE AI SCORES EN VERWIJSINGEN ------------------------------
+    st.markdown("### 🤖 Externe AI Scores & Platform Verwijzingen")
+    st.caption("Bekijk de specifieke AI & Analisten-scores direct op de bron-platforms:")
+
+    ext1, ext2, ext3, ext4 = st.columns(4)
+    with ext1:
+        st.markdown(f"**[Danelfin AI Score voor {ticker}](https://danelfin.com/stock/{ticker})**")
+        st.caption("AI Smart Score (1-10) gebaseerd op meer dan 10,000 indicatoren.")
+    with ext2:
+        st.markdown(f"**[Investing.com Technische Analyse](https://www.investing.com/search/?q={ticker})**")
+        st.caption("Technische samenvatting & trading/investing signalen.")
+    with ext3:
+        st.markdown(f"**[MarketScreener Ratings](https://www.marketscreener.com/search/?q={ticker})**")
+        st.caption("Analistenconsensus, koersdoelen en fundamental rating.")
+    with ext4:
+        st.markdown(f"**[Finviz Technical & News](https://finviz.com/quote.ashx?t={ticker})**")
+        st.caption("Insider trading, short float en direct overzicht van koersdoelen.")
+
+    st.markdown("---")
+
     # ---- RIJ 2: Technische niveaus & MACD --------------------------------
+    st.markdown("### Technische Indicatoren & Volume")
     c4, c5, c6, c7 = st.columns(4)
     with c4:
         if pd.isna(mfi_val):
