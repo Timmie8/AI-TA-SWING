@@ -9,9 +9,11 @@ Swingtrade Dashboard & Multi-Ticker Scanner (1-5 dagen horizon)
 """
 
 import concurrent.futures
+import xml.etree.ElementTree as ET
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+import requests
 import streamlit as st
 import yfinance as yf
 
@@ -63,7 +65,7 @@ def colored_box(label, value, color, sub=""):
 
 
 # ---------------------------------------------------------------------------
-# DATA ENGINE (YFINANCE, OPTIONS & SHORT INTEREST)
+# DATA ENGINE (YFINANCE, HERSTELDE OPTIONS & NIEUWS RSS FALLBACK)
 # ---------------------------------------------------------------------------
 @st.cache_data(ttl=300)
 def get_daily_data(ticker, period="1y"):
@@ -77,69 +79,111 @@ def get_daily_data(ticker, period="1y"):
 
 @st.cache_data(ttl=600)
 def get_ticker_info_and_options(ticker):
+    """Robuuste verwerking van Opties & Short Interest met meervoudige checks."""
+    short_percent, short_ratio = 0.0, 0.0
+    calls_vol, puts_vol = 0, 0
+    iv_list = []
+
     try:
         t = yf.Ticker(ticker)
         info = t.info or {}
 
-        # Short Interest Data
         short_percent = info.get("shortPercentOfFloat", 0) or 0
         short_ratio = info.get("shortRatio", 0) or 0
 
-        # Options Data Engine (Robuuste herhaalde controle voor de eerste 3 expiraties)
-        calls_vol, puts_vol = 0, 0
-        iv_list = []
-
-        try:
-            expirations = t.expirations
-            if expirations:
-                for exp in expirations[:3]:
+        # Probeer opties op te halen uit de eerstvolgende 3 expiraties
+        expirations = t.expirations
+        if expirations:
+            for exp in expirations[:3]:
+                try:
                     opt = t.option_chain(exp)
+                    c_df = opt.calls
+                    p_df = opt.puts
 
-                    c_vol = opt.calls["volume"].fillna(0).sum()
-                    p_vol = opt.puts["volume"].fillna(0).sum()
-
-                    if c_vol > 0 or p_vol > 0:
+                    if c_df is not None and not c_df.empty:
+                        c_vol = pd.to_numeric(c_df["volume"], errors="coerce").fillna(0).sum()
                         calls_vol += c_vol
-                        puts_vol += p_vol
-
-                        c_iv = opt.calls["impliedVolatility"].dropna().mean()
-                        p_iv = opt.puts["impliedVolatility"].dropna().mean()
-                        if pd.notna(c_iv):
+                        c_iv = pd.to_numeric(c_df["impliedVolatility"], errors="coerce").dropna().mean()
+                        if pd.notna(c_iv) and c_iv > 0:
                             iv_list.append(c_iv)
-                        if pd.notna(p_iv):
+
+                    if p_df is not None and not p_df.empty:
+                        p_vol = pd.to_numeric(p_df["volume"], errors="coerce").fillna(0).sum()
+                        puts_vol += p_vol
+                        p_iv = pd.to_numeric(p_df["impliedVolatility"], errors="coerce").dropna().mean()
+                        if pd.notna(p_iv) and p_iv > 0:
                             iv_list.append(p_iv)
 
+                    if calls_vol > 0 or puts_vol > 0:
                         break
+                except Exception:
+                    continue
+    except Exception:
+        pass
+
+    # Call / Put Ratio
+    if puts_vol > 0:
+        cp_ratio = round(calls_vol / puts_vol, 2)
+    elif calls_vol > 0:
+        cp_ratio = 2.0
+    else:
+        cp_ratio = 1.0
+
+    avg_iv = round(float(np.mean(iv_list)) * 100, 1) if iv_list else 0.0
+
+    return {
+        "short_percent": round(short_percent * 100, 2),
+        "short_ratio": round(short_ratio, 1),
+        "cp_ratio": cp_ratio,
+        "avg_iv": avg_iv,
+        "calls_vol": int(calls_vol),
+        "puts_vol": int(puts_vol),
+    }
+
+
+@st.cache_data(ttl=600)
+def get_ai_vader_sentiment(ticker):
+    """Herstelde Sentiment Engine met Directe Yahoo Finance RSS Feed Fallback."""
+    titles = []
+
+    # Method 1: yfinance news API (ondersteunt nieuw & oud formaat)
+    try:
+        t = yf.Ticker(ticker)
+        news_items = t.news or []
+        for item in news_items:
+            if isinstance(item, dict):
+                title = item.get("title") or item.get("content", {}).get("title")
+                if title:
+                    titles.append(title)
+    except Exception:
+        pass
+
+    # Method 2: Fallback via Yahoo Finance RSS Feed (wanneer t.news faalt)
+    if not titles:
+        try:
+            url = f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={ticker}&region=US&lang=en-US"
+            resp = requests.get(
+                url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}, timeout=4
+            )
+            if resp.status_code == 200:
+                root = ET.fromstring(resp.content)
+                for item in root.findall(".//item"):
+                    t_text = item.find("title")
+                    if t_text is not None and t_text.text:
+                        titles.append(t_text.text)
         except Exception:
             pass
 
-        # Call/Put Ratio Berekening
-        if puts_vol > 0:
-            cp_ratio = round(calls_vol / puts_vol, 2)
-        elif calls_vol > 0:
-            cp_ratio = 2.0
-        else:
-            cp_ratio = 1.0
+    if not titles:
+        return 5.0, "Geen recente koppen"
 
-        avg_iv = round(np.mean(iv_list) * 100, 1) if iv_list else 0.0
+    # VADER sentiment berekening op de gevonden koppen
+    scores = [sia.polarity_scores(t)["compound"] for t in titles[:10]]
+    avg_compound = float(np.mean(scores))
+    ai_score = round((avg_compound + 1) * 4.5 + 1, 1)
 
-        return {
-            "short_percent": round(short_percent * 100, 2),
-            "short_ratio": round(short_ratio, 1),
-            "cp_ratio": cp_ratio,
-            "avg_iv": avg_iv,
-            "calls_vol": int(calls_vol),
-            "puts_vol": int(puts_vol),
-        }
-    except Exception:
-        return {
-            "short_percent": 0.0,
-            "short_ratio": 0.0,
-            "cp_ratio": 1.0,
-            "avg_iv": 0.0,
-            "calls_vol": 0,
-            "puts_vol": 0,
-        }
+    label = "Bullish" if ai_score >= 6.0 else ("Bearish" if ai_score <= 4.0 else "Neutraal")
+    return ai_score, f"{label} ({len(scores)} koppen)"
 
 
 # ---------------------------------------------------------------------------
@@ -184,24 +228,6 @@ def compute_ml_swing_prediction(df):
     prob_bullish = model.predict_proba(X.iloc[[-1]])[0][1] * 100
     label = "Stijging (3-5d)" if prob_bullish >= 60 else ("Daling/Risico" if prob_bullish <= 40 else "Neutraal")
     return round(prob_bullish, 1), f"AI Pattern: {label}"
-
-
-@st.cache_data(ttl=600)
-def get_ai_vader_sentiment(ticker):
-    try:
-        t = yf.Ticker(ticker)
-        news = t.news
-        if not news:
-            return 5.0, "Geen nieuws"
-        scores = [sia.polarity_scores(item.get("title", ""))["compound"] for item in news[:10] if item.get("title")]
-        if not scores:
-            return 5.0, "Geen nieuws"
-        avg_compound = np.mean(scores)
-        ai_score = round(float((avg_compound + 1) * 4.5 + 1), 1)
-        label = "Bullish" if ai_score >= 6.0 else ("Bearish" if ai_score <= 4.0 else "Neutraal")
-        return ai_score, f"{label} ({len(scores)} art.)"
-    except Exception:
-        return 5.0, "Neutraal"
 
 
 def add_technical_indicators(df):
