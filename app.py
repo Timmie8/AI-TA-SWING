@@ -6,6 +6,8 @@ Swingtrade Dashboard & Multi-Ticker Scanner (1-5 dagen horizon)
 - Short Selling / Short Float Analysis
 - Dynamic Support & Resistance Levels
 - Machine Learning (XGBoost/RF) & NLP Sentiment Analysis
+- Volume Analysis (10-day Avg Volume)
+- Single Candle (1D) & 3-Day Candle Pattern Recognition
 """
 
 import concurrent.futures
@@ -131,11 +133,8 @@ def get_ticker_info_and_options(ticker):
         pass
 
     # Berekening Ratios & Metrics
-    # Put/Call Ratio op basis van volume
     pc_ratio_vol = round(total_put_vol / total_call_vol, 2) if total_call_vol > 0 else 1.0
-    # Call/Put Ratio (voor algemene bullish/bearish score)
     cp_ratio = round(total_call_vol / total_put_vol, 2) if total_put_vol > 0 else (2.0 if total_call_vol > 0 else 1.0)
-    # Put/Call Ratio op basis van Open Interest
     pc_ratio_oi = round(total_put_oi / total_call_oi, 2) if total_call_oi > 0 else 1.0
 
     avg_iv = round(float(np.mean(iv_list)) * 100, 1) if iv_list else 0.0
@@ -159,7 +158,6 @@ def get_ai_vader_sentiment(ticker):
     """Herstelde Sentiment Engine met Directe Yahoo Finance RSS Feed Fallback."""
     titles = []
 
-    # Method 1: yfinance news API
     try:
         t = yf.Ticker(ticker)
         news_items = t.news or []
@@ -171,7 +169,6 @@ def get_ai_vader_sentiment(ticker):
     except Exception:
         pass
 
-    # Method 2: Fallback via Yahoo Finance RSS Feed
     if not titles:
         try:
             url = f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={ticker}&region=US&lang=en-US"
@@ -190,13 +187,77 @@ def get_ai_vader_sentiment(ticker):
     if not titles:
         return 5.0, "Geen recente koppen"
 
-    # VADER sentiment berekening
     scores = [sia.polarity_scores(t)["compound"] for t in titles[:10]]
     avg_compound = float(np.mean(scores))
     ai_score = round((avg_compound + 1) * 4.5 + 1, 1)
 
     label = "Bullish" if ai_score >= 6.0 else ("Bearish" if ai_score <= 4.0 else "Neutraal")
     return ai_score, f"{label} ({len(scores)} koppen)"
+
+
+# ---------------------------------------------------------------------------
+# CANDLESTICK & VOLUME ANALYSE FUNCTIES
+# ---------------------------------------------------------------------------
+def analyze_candles(df):
+    """
+    Analyseert het gemiddelde volume, de meest recente dagcandle (1D) en de 3-dagen candle structuur.
+    """
+    if len(df) < 3:
+        return {
+            "avg_volume": 0,
+            "last_volume": 0,
+            "candle_1d_label": "N/A",
+            "candle_1d_bullish": False,
+            "candle_3d_label": "N/A",
+            "candle_3d_bullish": False,
+        }
+
+    # 1. Gemiddeld dagvolume (10-daags voortschrijdend)
+    avg_vol_10 = int(df["Volume"].tail(10).mean())
+    last_vol = int(df["Volume"].iloc[-1])
+
+    # 2. Laatste Dag Candle (1D)
+    last_row = df.iloc[-1]
+    o_1, c_1 = last_row["Open"], last_row["Close"]
+    h_1, l_1 = last_row["High"], last_row["Low"]
+
+    change_1d = ((c_1 - o_1) / o_1) * 100
+    is_1d_bullish = c_1 >= o_1
+
+    if is_1d_bullish:
+        candle_1d_label = f"🟢 Bullish ({change_1d:+.2f}%)"
+    else:
+        candle_1d_label = f"🔴 Bearish ({change_1d:+.2f}%)"
+
+    # 3. Drie-dagen Candle Analyse (3D)
+    last_3 = df.tail(3)
+    c_start = last_3["Open"].iloc[0]
+    c_end = last_3["Close"].iloc[-1]
+    net_3d_change = ((c_end - c_start) / c_start) * 100
+
+    c_flags = [(row["Close"] >= row["Open"]) for _, row in last_3.iterrows()]
+
+    if all(c_flags):
+        candle_3d_label = f"🟢 Sterk Bullish (3 Witte Soldaten: {net_3d_change:+.2f}%)"
+        is_3d_bullish = True
+    elif not any(c_flags):
+        candle_3d_label = f"🔴 Sterk Bearish (3 Zwarte Kraaien: {net_3d_change:+.2f}%)"
+        is_3d_bullish = False
+    elif c_end > c_start:
+        candle_3d_label = f"🟢 Bullish Reversal/Trend ({net_3d_change:+.2f}%)"
+        is_3d_bullish = True
+    else:
+        candle_3d_label = f"🔴 Bearish Reversal/Trend ({net_3d_change:+.2f}%)"
+        is_3d_bullish = False
+
+    return {
+        "avg_volume": avg_vol_10,
+        "last_volume": last_vol,
+        "candle_1d_label": candle_1d_label,
+        "candle_1d_bullish": is_1d_bullish,
+        "candle_3d_label": candle_3d_label,
+        "candle_3d_bullish": is_3d_bullish,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -275,6 +336,7 @@ def compute_stock_analysis(t_code):
     ai_score, ai_subtext = get_ai_vader_sentiment(t_code)
     ml_prob, ml_subtext = compute_ml_swing_prediction(df)
     support, resistance = calc_support_resistance(df)
+    candle_info = analyze_candles(df)
 
     last = df.iloc[-1]
     price = last["Close"]
@@ -290,6 +352,20 @@ def compute_stock_analysis(t_code):
     elif ml_prob <= 40.0:
         score -= 1.5
         reasons.append(f"ML Low Prob ({ml_prob}%)")
+
+    if candle_info["candle_1d_bullish"]:
+        score += 0.5
+        reasons.append("1D Candle Bullish")
+    else:
+        score -= 0.5
+        reasons.append("1D Candle Bearish")
+
+    if candle_info["candle_3d_bullish"]:
+        score += 0.5
+        reasons.append("3D Candle Pattern Bullish")
+    else:
+        score -= 0.5
+        reasons.append("3D Candle Pattern Bearish")
 
     if opt_short["cp_ratio"] > 1.3:
         score += 1
@@ -338,6 +414,7 @@ def compute_stock_analysis(t_code):
         "ml_prob": ml_prob,
         "ml_subtext": ml_subtext,
         "opt_short": opt_short,
+        "candle_info": candle_info,
     }
 
 
@@ -345,7 +422,7 @@ def compute_stock_analysis(t_code):
 # DASHBOARD UI
 # ---------------------------------------------------------------------------
 st.title("📊 Swingtrade Dashboard & Scanner (1-5 dagen)")
-st.caption("Includes Options Chain, Short Float, Support & Resistance, AI ML & NLP Models.")
+st.caption("Includes Options Chain, Short Float, Support & Resistance, Volume & Candle Analysis, AI ML & NLP Models.")
 
 col_input, col_btn = st.columns([3, 1])
 with col_input:
@@ -363,12 +440,13 @@ with col_btn:
 ticker = st.session_state.selected_ticker
 
 if ticker:
-    with st.spinner(f"Opties Chain, Short Interest & AI Modellen berekenen voor {ticker}..."):
+    with st.spinner(f"Opties Chain, Short Interest, Volume & Candle Data berekenen voor {ticker}..."):
         res = compute_stock_analysis(ticker)
 
     if res:
         df = res["df"]
         opt = res["opt_short"]
+        c_info = res["candle_info"]
         overall_color = GREEN if res["Totaal Score"] >= 2.5 else (RED if res["Totaal Score"] <= -2.5 else ORANGE)
 
         st.markdown("---")
@@ -383,7 +461,23 @@ if ticker:
 
         st.markdown("---")
 
-        # ---- RIJ 1: AI & ML MODEL BEREKENINGEN ------------------------------
+        # ---- RIJ 1: CANDLESTICK & VOLUME ANALYSE ----------------------------
+        st.markdown("### 🕯️ Volume & Candlestick Structuur")
+        v1, v2, v3 = st.columns(3)
+        with v1:
+            vol_ratio = (
+                (c_info["last_volume"] / c_info["avg_volume"]) * 100 if c_info["avg_volume"] > 0 else 100
+            )
+            vol_sub = f"Laatste Volume: {c_info['last_volume']:,} ({vol_ratio:.0f}% van gem.)"
+            colored_box("Gemiddeld Volume (10d)", f"{c_info['avg_volume']:,}", GRAY, vol_sub)
+        with v2:
+            c1d_color = GREEN if c_info["candle_1d_bullish"] else RED
+            colored_box("Dag Candle Status (1D)", c_info["candle_1d_label"], c1d_color, "Huidige dag/laatste slotcandle")
+        with v3:
+            c3d_color = GREEN if c_info["candle_3d_bullish"] else RED
+            colored_box("3-Dagen Candle Patroon", c_info["candle_3d_label"], c3d_color, "Cumulatieve 3-daagse trend")
+
+        # ---- RIJ 2: AI & ML MODEL BEREKENINGEN ------------------------------
         st.markdown("### 🤖 AI Pattern Recognition & Sentiment")
         c0, c1, c2, c3 = st.columns(4)
         with c0:
@@ -397,7 +491,7 @@ if ticker:
         with c3:
             colored_box("Resistance Level (Key High)", res["Resistance"], RED, "Belangrijkste weerstandszone")
 
-        # ---- RIJ 2: OPTIONS CHAIN & SHORT SELLING ANALYSE -------------------
+        # ---- RIJ 3: OPTIONS CHAIN & SHORT SELLING ANALYSE -------------------
         st.markdown("### ⚡ Options Chain & Short Selling Metrics")
         o1, o2, o3, o4 = st.columns(4)
         with o1:
@@ -465,7 +559,7 @@ if ticker:
 # ---------------------------------------------------------------------------
 st.markdown("---")
 st.subheader("🔍 Multi-Ticker Live Scanner")
-st.caption("Scan meerdere aandelen tegelijk op AI Modellen, Levels, Options Chain & Short Interest.")
+st.caption("Scan meerdere aandelen tegelijk op AI Modellen, Levels, Candles, Options Chain & Short Interest.")
 
 default_tickers = "AAPL, TSLA, NVDA, MSFT, AMD, AMZN, GOOGL, META, PLTR"
 scan_input = st.text_area("Voer tickers in (gescheiden door komma's):", value=default_tickers, height=70)
@@ -476,7 +570,7 @@ if scan_btn and scan_input:
     tickers_to_scan = [t.strip().upper() for t in scan_input.split(",") if t.strip()]
 
     if tickers_to_scan:
-        st.info(f"Bezig met berekenen van alle AI Modellen & Options Data voor {len(tickers_to_scan)} aandelen...")
+        st.info(f"Bezig met berekenen van alle AI Modellen, Candles & Options Data voor {len(tickers_to_scan)} aandelen...")
         progress_bar = st.progress(0)
         results = []
 
@@ -501,14 +595,18 @@ if "scan_results" in st.session_state:
     st.markdown("### 🏆 Scan Resultaten (Gesorteerd op Totaal Score)")
 
     for idx, row in scan_df.iterrows():
-        col_t, col_sig, col_score, col_ml, col_levels, col_opt, col_act = st.columns([1.1, 1.4, 1.1, 1.3, 1.8, 1.6, 1.7])
+        c_i = row["candle_info"]
+        col_t, col_sig, col_score, col_vol_candle, col_ml, col_levels, col_act = st.columns([1.1, 1.3, 1.0, 2.0, 1.2, 1.6, 1.5])
 
         col_t.markdown(f"**{row['Ticker']}**<br><small>${row['Koers']}</small>", unsafe_allow_html=True)
         col_sig.markdown(row["Signaal"])
         col_score.markdown(f"**Score: {row['Totaal Score']}**")
+        col_vol_candle.markdown(
+            f"<small>Avg Vol: {c_i['avg_volume']:,}<br>1D: {c_i['candle_1d_label']}<br>3D: {c_i['candle_3d_label']}</small>",
+            unsafe_allow_html=True,
+        )
         col_ml.markdown(f"🤖 **{row['ML Kans']}**")
         col_levels.markdown(f"<small>Sup: {row['Support']}<br>Res: {row['Resistance']}</small>", unsafe_allow_html=True)
-        col_opt.markdown(f"<small>Short: {row['Short Float']}<br>P/C Vol: {row['P/C Vol']}</small>", unsafe_allow_html=True)
 
         if col_act.button(f"📊 Analyseer {row['Ticker']}", key=f"btn_{row['Ticker']}_{idx}"):
             st.session_state.selected_ticker = row["Ticker"]
