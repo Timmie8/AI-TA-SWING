@@ -2,7 +2,7 @@
 Swingtrade Dashboard & Multi-Ticker Scanner (1-5 dagen horizon)
 ===============================================================
 - Interactive Multi-Ticker Scanner Cards
-- Options Chain Metrics (Call/Put Ratio & Implied Volatility)
+- Options Chain Metrics (Call/Put Ratio, Volume & Implied Volatility)
 - Short Selling / Short Float Analysis
 - Dynamic Support & Resistance Levels
 - Machine Learning (XGBoost/RF) & NLP Sentiment Analysis
@@ -85,32 +85,61 @@ def get_ticker_info_and_options(ticker):
         short_percent = info.get("shortPercentOfFloat", 0) or 0
         short_ratio = info.get("shortRatio", 0) or 0
 
-        # Options Data
-        calls_vol, puts_vol, avg_iv = 0, 0, 0
+        # Options Data Engine (Robuuste herhaalde controle voor de eerste 3 expiraties)
+        calls_vol, puts_vol = 0, 0
+        iv_list = []
+
         try:
             expirations = t.expirations
             if expirations:
-                nearest_exp = expirations[0]
-                opt = t.option_chain(nearest_exp)
-                calls_vol = opt.calls["volume"].sum() or 0
-                puts_vol = opt.puts["volume"].sum() or 0
+                for exp in expirations[:3]:
+                    opt = t.option_chain(exp)
 
-                iv_calls = opt.calls["impliedVolatility"].mean() or 0
-                iv_puts = opt.puts["impliedVolatility"].mean() or 0
-                avg_iv = (iv_calls + iv_puts) / 2
+                    c_vol = opt.calls["volume"].fillna(0).sum()
+                    p_vol = opt.puts["volume"].fillna(0).sum()
+
+                    if c_vol > 0 or p_vol > 0:
+                        calls_vol += c_vol
+                        puts_vol += p_vol
+
+                        c_iv = opt.calls["impliedVolatility"].dropna().mean()
+                        p_iv = opt.puts["impliedVolatility"].dropna().mean()
+                        if pd.notna(c_iv):
+                            iv_list.append(c_iv)
+                        if pd.notna(p_iv):
+                            iv_list.append(p_iv)
+
+                        break
         except Exception:
             pass
 
-        cp_ratio = round(calls_vol / puts_vol, 2) if puts_vol > 0 else (2.0 if calls_vol > 0 else 1.0)
+        # Call/Put Ratio Berekening
+        if puts_vol > 0:
+            cp_ratio = round(calls_vol / puts_vol, 2)
+        elif calls_vol > 0:
+            cp_ratio = 2.0
+        else:
+            cp_ratio = 1.0
+
+        avg_iv = round(np.mean(iv_list) * 100, 1) if iv_list else 0.0
 
         return {
             "short_percent": round(short_percent * 100, 2),
             "short_ratio": round(short_ratio, 1),
             "cp_ratio": cp_ratio,
-            "avg_iv": round(avg_iv * 100, 1),
+            "avg_iv": avg_iv,
+            "calls_vol": int(calls_vol),
+            "puts_vol": int(puts_vol),
         }
     except Exception:
-        return {"short_percent": 0.0, "short_ratio": 0.0, "cp_ratio": 1.0, "avg_iv": 0.0}
+        return {
+            "short_percent": 0.0,
+            "short_ratio": 0.0,
+            "cp_ratio": 1.0,
+            "avg_iv": 0.0,
+            "calls_vol": 0,
+            "puts_vol": 0,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -210,7 +239,6 @@ def compute_stock_analysis(t_code):
 
     last = df.iloc[-1]
     price = last["Close"]
-    rsi_val = last["RSI"]
     macd_bullish = last["MACD"] > last["MACD_signal"]
     sma_bullish = price > last["SMA20"]
 
@@ -333,8 +361,10 @@ if ticker:
         st.markdown("### ⚡ Options & Short Selling Metrics")
         o1, o2, o3, o4 = st.columns(4)
         with o1:
-            cp_color = GREEN if opt["cp_ratio"] > 1.2 else (RED if opt["cp_ratio"] < 0.8 else ORANGE)
-            colored_box("Call / Put Volume Ratio", f"{opt['cp_ratio']}", cp_color, "> 1.0 = Bullish Sentiment")
+            cp_ratio = opt["cp_ratio"]
+            cp_color = GREEN if cp_ratio > 1.2 else (RED if cp_ratio < 0.8 else ORANGE)
+            subtext = f"Calls: {opt.get('calls_vol',0):,} | Puts: {opt.get('puts_vol',0):,}"
+            colored_box("Call / Put Volume Ratio", f"{cp_ratio}", cp_color, subtext)
         with o2:
             colored_box("Implied Volatility (IV)", f"{opt['avg_iv']}%", GRAY, "Verwachte 30-dagen volatiliteit")
         with o3:
