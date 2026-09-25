@@ -1,7 +1,8 @@
 """
 Swingtrade Dashboard & Multi-Ticker Scanner (1-5 dagen horizon)
 ===============================================================
-- Options Data (Call/Put Volume Ratio & Implied Volatility)
+- Interactive Multi-Ticker Scanner Cards
+- Options Chain Metrics (Call/Put Ratio & Implied Volatility)
 - Short Selling / Short Float Analysis
 - Dynamic Support & Resistance Levels
 - Machine Learning (XGBoost/RF) & NLP Sentiment Analysis
@@ -76,9 +77,6 @@ def get_daily_data(ticker, period="1y"):
 
 @st.cache_data(ttl=600)
 def get_ticker_info_and_options(ticker):
-    """
-    Haalt Short Interest, Options Chain metrics en fundamentele data op.
-    """
     try:
         t = yf.Ticker(ticker)
         info = t.info or {}
@@ -97,7 +95,6 @@ def get_ticker_info_and_options(ticker):
                 calls_vol = opt.calls["volume"].sum() or 0
                 puts_vol = opt.puts["volume"].sum() or 0
 
-                # Implied Volatility berekening
                 iv_calls = opt.calls["impliedVolatility"].mean() or 0
                 iv_puts = opt.puts["impliedVolatility"].mean() or 0
                 avg_iv = (iv_calls + iv_puts) / 2
@@ -120,9 +117,6 @@ def get_ticker_info_and_options(ticker):
 # SUPPORT & RESISTANCE & TECHNISCHE BEREKENINGEN
 # ---------------------------------------------------------------------------
 def calc_support_resistance(df, window=3, lookback=60):
-    """
-    Berekent de belangrijkste Support en Resistance niveaus op basis van swing highs/lows.
-    """
     recent = df.tail(lookback).copy()
     highs, lows = [], []
     h, l = recent["High"].values, recent["Low"].values
@@ -185,7 +179,6 @@ def add_technical_indicators(df):
     df["SMA20"] = df["Close"].rolling(20).mean()
     df["SMA50"] = df["Close"].rolling(50).mean()
 
-    # RSI
     delta = df["Close"].diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
@@ -194,7 +187,6 @@ def add_technical_indicators(df):
     rs = avg_gain / avg_loss
     df["RSI"] = 100 - (100 / (1 + rs))
 
-    # MACD
     ema12 = df["Close"].ewm(span=12, adjust=False).mean()
     ema26 = df["Close"].ewm(span=26, adjust=False).mean()
     df["MACD"] = ema12 - ema26
@@ -395,45 +387,57 @@ if ticker:
         st.plotly_chart(fig, use_container_width=True)
 
 # ---------------------------------------------------------------------------
-# MULTI-TICKER SCANNER MET ALLE STATISTIEKEN
+# MULTI-TICKER SCANNER (INTERACTIEVE RIJEN SCANNER)
 # ---------------------------------------------------------------------------
 st.markdown("---")
 st.subheader("🔍 Multi-Ticker Live Scanner")
+st.caption("Scan meerdere aandelen tegelijk op AI Modellen, Levels, Options & Short Interest.")
+
 default_tickers = "AAPL, TSLA, NVDA, MSFT, AMD, AMZN, GOOGL, META, PLTR"
-scan_input = st.text_area("Voer tickers in:", value=default_tickers, height=70)
+scan_input = st.text_area("Voer tickers in (gescheiden door komma's):", value=default_tickers, height=70)
 
-if st.button("🚀 Start Multi-Ticker Scan", type="secondary") and scan_input:
-    tickers = [t.strip().upper() for t in scan_input.split(",") if t.strip()]
-    results = []
+scan_btn = st.button("🚀 Start Multi-Ticker Scan", type="secondary")
 
-    progress = st.progress(0)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-        futures = {executor.submit(compute_stock_analysis, t): t for t in tickers}
-        for i, future in enumerate(concurrent.futures.as_completed(futures)):
-            data = future.result()
-            if data:
-                results.append(data)
-            progress.progress((i + 1) / len(tickers))
+if scan_btn and scan_input:
+    tickers_to_scan = [t.strip().upper() for t in scan_input.split(",") if t.strip()]
 
-    if results:
-        st.session_state.scan_results = (
-            pd.DataFrame(results).sort_values(by="Totaal Score", ascending=False).reset_index(drop=True)
-        )
+    if tickers_to_scan:
+        st.info(f"Bezig met berekenen van alle AI Modellen & Data voor {len(tickers_to_scan)} aandelen...")
+        progress_bar = st.progress(0)
+        results = []
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            future_to_ticker = {executor.submit(compute_stock_analysis, t): t for t in tickers_to_scan}
+            completed = 0
+            for future in concurrent.futures.as_completed(future_to_ticker):
+                data = future.result()
+                if data:
+                    results.append(data)
+                completed += 1
+                progress_bar.progress(completed / len(tickers_to_scan))
+
+        if results:
+            st.session_state.scan_results = (
+                pd.DataFrame(results).sort_values(by="Totaal Score", ascending=False).reset_index(drop=True)
+            )
 
 if "scan_results" in st.session_state:
     scan_df = st.session_state.scan_results
-    st.markdown("### 🏆 Scan Resultaten")
 
-    # Toon overzichtstabel met alle gezochte velden
-    display_cols = ["Ticker", "Signaal", "Totaal Score", "ML Kans", "Support", "Resistance", "Short Float", "Call/Put", "Koers"]
-    st.dataframe(scan_df[display_cols], use_container_width=True)
+    st.markdown("### 🏆 Scan Resultaten (Gesorteerd op Totaal Score)")
 
-    # Doorklikknoppen
     for idx, row in scan_df.iterrows():
-        c1, c2, c3, c4 = st.columns([1.5, 2, 2, 2])
-        c1.markdown(f"**{row['Ticker']}** ({row['Koers']})")
-        c2.markdown(f"Support: **{row['Support']}** | Res: **{row['Resistance']}**")
-        c3.markdown(f"Short: **{row['Short Float']}** | Call/Put: **{row['Call/Put']}**")
-        if c4.button(f"📊 Analyseer {row['Ticker']}", key=f"scan_btn_{row['Ticker']}_{idx}"):
+        col_t, col_sig, col_score, col_ml, col_levels, col_opt, col_act = st.columns([1.1, 1.4, 1.1, 1.3, 1.8, 1.6, 1.7])
+
+        col_t.markdown(f"**{row['Ticker']}**<br><small>${row['Koers']}</small>", unsafe_allow_html=True)
+        col_sig.markdown(row["Signaal"])
+        col_score.markdown(f"**Score: {row['Totaal Score']}**")
+        col_ml.markdown(f"🤖 **{row['ML Kans']}**")
+        col_levels.markdown(f"<small>Sup: {row['Support']}<br>Res: {row['Resistance']}</small>", unsafe_allow_html=True)
+        col_opt.markdown(f"<small>Short: {row['Short Float']}<br>C/P: {row['Call/Put']}</small>", unsafe_allow_html=True)
+
+        if col_act.button(f"📊 Analyseer {row['Ticker']}", key=f"btn_{row['Ticker']}_{idx}"):
             st.session_state.selected_ticker = row["Ticker"]
             st.rerun()
+
+        st.markdown("<hr style='margin: 4px 0px; border-top: 1px solid #eee;'>", unsafe_allow_html=True)
