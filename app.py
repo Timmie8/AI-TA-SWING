@@ -2,7 +2,7 @@
 Swingtrade Dashboard & Multi-Ticker Scanner (1-5 dagen horizon)
 ===============================================================
 - Individuele diepgaande analyse
-- Multi-Ticker Scanner onderaan voor snelle vergelijking
+- Multi-Ticker Scanner met interactieve doorklik functionaliteit
 """
 
 import concurrent.futures
@@ -30,11 +30,15 @@ def load_vader():
 sia = load_vader()
 
 # ---------------------------------------------------------------------------
-# PAGINA CONFIGURATIE
+# PAGINA CONFIGURATIE & SESSION STATE
 # ---------------------------------------------------------------------------
 st.set_page_config(
     page_title="Swingtrade Dashboard & Scanner", layout="wide"
 )
+
+# Onthoud geselecteerde ticker
+if "selected_ticker" not in st.session_state:
+    st.session_state.selected_ticker = "AAPL"
 
 GREEN = "#16a34a"
 RED = "#dc2626"
@@ -187,18 +191,6 @@ def calc_support_resistance(df, window=3, lookback=60):
     )
 
 
-def calc_money_flow_index(df, period=14):
-    tp = (df["High"] + df["Low"] + df["Close"]) / 3
-    raw_flow = tp * df["Volume"]
-    direction = tp.diff()
-    pos_flow = raw_flow.where(direction > 0, 0.0)
-    neg_flow = raw_flow.where(direction < 0, 0.0)
-    pos_sum = pos_flow.rolling(period).sum()
-    neg_sum = neg_flow.rolling(period).sum()
-    mfr = pos_sum / neg_sum
-    return 100 - (100 / (1 + mfr))
-
-
 def intraday_money_flow(df_intraday):
     if df_intraday.empty:
         return None
@@ -257,7 +249,7 @@ def determine_trend(df):
 
 
 # ---------------------------------------------------------------------------
-# CORE ANALYSE FUNCTIE (GEBRUIKT VOOR DASHBOARD EN SCANNER)
+# CORE ANALYSE FUNCTIE
 # ---------------------------------------------------------------------------
 def compute_stock_analysis(t_code):
     df = get_daily_data(t_code)
@@ -365,175 +357,177 @@ st.caption(
 
 col_input, col_btn = st.columns([3, 1])
 with col_input:
-    ticker = (
-        st.text_input("Enkel Aandeel Analyse (bv. AAPL, TSLA, NVDA)", value="AAPL")
+    ticker_input = (
+        st.text_input(
+            "Enkel Aandeel Analyse (bv. AAPL, TSLA, NVDA)",
+            value=st.session_state.selected_ticker,
+        )
         .upper()
         .strip()
     )
 with col_btn:
     st.write("")
     st.write("")
-    run = st.button("Analyseer Ticker", type="primary", use_container_width=True)
+    if st.button("Analyseer Ticker", type="primary", use_container_width=True):
+        st.session_state.selected_ticker = ticker_input
 
-if run and ticker:
+ticker = st.session_state.selected_ticker
+
+if ticker:
     with st.spinner(f"Data & AI Sentiment ophalen voor {ticker}..."):
         res = compute_stock_analysis(ticker)
 
     if not res:
-        st.error("Geen data gevonden. Controleer het ticker-symbool.")
-        st.stop()
+        st.error(f"Geen data gevonden voor ticker '{ticker}'. Controleer de invoer.")
+    else:
+        df = res["df"]
+        df_intraday = res["df_intraday"]
+        ai_score = res["ai_score"]
+        ai_subtext = res["ai_subtext"]
+        trend_label = res["trend_label"]
+        trend_color = res["trend_color"]
+        candle3_label = res["candle3_label"]
+        candle3_color = res["candle3_color"]
+        flow_today = res["flow_today"]
+        score = res["Totaal Score"]
 
-    df = res["df"]
-    df_intraday = res["df_intraday"]
-    ai_score = res["ai_score"]
-    ai_subtext = res["ai_subtext"]
-    trend_label = res["trend_label"]
-    trend_color = res["trend_color"]
-    candle3_label = res["candle3_label"]
-    candle3_color = res["candle3_color"]
-    flow_today = res["flow_today"]
-    score = res["Totaal Score"]
+        support, resistance = calc_support_resistance(df)
 
-    support, resistance = calc_support_resistance(df)
-    option_data = get_option_data(ticker)
-    short_data = get_short_data(ticker)
+        last = df.iloc[-1]
+        price = last["Close"]
+        rsi_val = last["RSI"]
 
-    last = df.iloc[-1]
-    price = last["Close"]
-    rsi_val = last["RSI"]
-    macd_bullish = last["MACD"] > last["MACD_signal"]
-
-    overall_color = (
-        GREEN if score >= 2 else (RED if score <= -2 else ORANGE)
-    )
-
-    # ---- DISPLAY HEADER -------------------------------------------------
-    st.markdown("---")
-    st.subheader(f"{ticker} — Laatste koers: ${price:.2f}")
-
-    colored_box(
-        "Overall Swingtrade Signaal",
-        f"{res['Signaal']} (Score: {score:+d})",
-        overall_color,
-        res["Details"],
-    )
-
-    st.markdown("---")
-
-    # ---- RIJ 1: AI Score & Trend ----------------------------------------
-    st.markdown("### AI Sentiment & Basissignalen")
-    c0, c1, c2, c3 = st.columns(4)
-    with c0:
-        ai_color = (
-            GREEN if ai_score >= 6.0 else (RED if ai_score <= 4.0 else ORANGE)
+        overall_color = (
+            GREEN if score >= 2 else (RED if score <= -2 else ORANGE)
         )
+
+        # ---- DISPLAY HEADER -------------------------------------------------
+        st.markdown("---")
+        st.subheader(f"🔍 Uitgebreide Analyse: {ticker} — Laatste koers: ${price:.2f}")
+
         colored_box(
-            "NLP AI Sentiment Score", f"{ai_score} / 10", ai_color, ai_subtext
+            "Overall Swingtrade Signaal",
+            f"{res['Signaal']} (Score: {score:+d})",
+            overall_color,
+            res["Details"],
         )
-    with c1:
-        colored_box(
-            "Trend (SMA20/SMA50)",
-            trend_label.split(" (")[0],
-            trend_color,
-            sub=trend_label,
-        )
-    with c2:
-        colored_box(
-            "3-daagse candle status",
-            candle3_label.split(" (")[0],
-            candle3_color,
-            sub=candle3_label,
-        )
-    with c3:
-        if pd.isna(rsi_val):
-            colored_box("RSI (14)", "n.v.t.", GRAY, "Onvoldoende historie")
-        else:
-            rsi_color = (
-                RED if rsi_val > 70 else (GREEN if rsi_val < 30 else ORANGE)
+
+        st.markdown("---")
+
+        # ---- RIJ 1: AI Score & Trend ----------------------------------------
+        st.markdown("### AI Sentiment & Basissignalen")
+        c0, c1, c2, c3 = st.columns(4)
+        with c0:
+            ai_color = (
+                GREEN if ai_score >= 6.0 else (RED if ai_score <= 4.0 else ORANGE)
             )
-            rsi_sub = (
-                "Overbought (>70)"
-                if rsi_val > 70
-                else ("Oversold (<30)" if rsi_val < 30 else "Neutraal")
+            colored_box(
+                "NLP AI Sentiment Score", f"{ai_score} / 10", ai_color, ai_subtext
             )
-            colored_box("RSI (14)", f"{rsi_val:.1f}", rsi_color, rsi_sub)
+        with c1:
+            colored_box(
+                "Trend (SMA20/SMA50)",
+                trend_label.split(" (")[0],
+                trend_color,
+                sub=trend_label,
+            )
+        with c2:
+            colored_box(
+                "3-daagse candle status",
+                candle3_label.split(" (")[0],
+                candle3_color,
+                sub=candle3_label,
+            )
+        with c3:
+            if pd.isna(rsi_val):
+                colored_box("RSI (14)", "n.v.t.", GRAY, "Onvoldoende historie")
+            else:
+                rsi_color = (
+                    RED if rsi_val > 70 else (GREEN if rsi_val < 30 else ORANGE)
+                )
+                rsi_sub = (
+                    "Overbought (>70)"
+                    if rsi_val > 70
+                    else ("Oversold (<30)" if rsi_val < 30 else "Neutraal")
+                )
+                colored_box("RSI (14)", f"{rsi_val:.1f}", rsi_color, rsi_sub)
 
-    # ---- EXTERNE AI LINKS -----------------------------------------------
-    st.markdown("### 🤖 Externe AI Scores & Platform Verwijzingen")
-    ext1, ext2, ext3, ext4 = st.columns(4)
-    with ext1:
-        st.markdown(
-            f"**[Danelfin AI Score voor {ticker}](https://danelfin.com/stock/{ticker})**"
+        # ---- EXTERNE AI LINKS -----------------------------------------------
+        st.markdown("### 🤖 Externe AI Scores & Platform Verwijzingen")
+        ext1, ext2, ext3, ext4 = st.columns(4)
+        with ext1:
+            st.markdown(
+                f"**[Danelfin AI Score voor {ticker}](https://danelfin.com/stock/{ticker})**"
+            )
+        with ext2:
+            st.markdown(
+                f"**[Investing.com {ticker}](https://www.investing.com/search/?q={ticker})**"
+            )
+        with ext3:
+            st.markdown(
+                f"**[MarketScreener {ticker}](https://www.marketscreener.com/search/?q={ticker})**"
+            )
+        with ext4:
+            st.markdown(
+                f"**[Finviz Quote {ticker}](https://finviz.com/quote.ashx?t={ticker})**"
+            )
+
+        st.markdown("---")
+
+        # ---- GRAFIEK ---------------------------------------------------------
+        st.markdown("### Prijsgrafiek met Moving Averages & Levels")
+        plot_df = df.tail(90)
+        fig = go.Figure()
+        fig.add_trace(
+            go.Candlestick(
+                x=plot_df.index,
+                open=plot_df["Open"],
+                high=plot_df["High"],
+                low=plot_df["Low"],
+                close=plot_df["Close"],
+                name="Prijs",
+                increasing_line_color=GREEN,
+                decreasing_line_color=RED,
+            )
         )
-    with ext2:
-        st.markdown(
-            f"**[Investing.com {ticker}](https://www.investing.com/search/?q={ticker})**"
+        fig.add_trace(
+            go.Scatter(
+                x=plot_df.index,
+                y=plot_df["SMA20"],
+                name="SMA20",
+                line=dict(color="#3b82f6", width=1.5),
+            )
         )
-    with ext3:
-        st.markdown(
-            f"**[MarketScreener {ticker}](https://www.marketscreener.com/search/?q={ticker})**"
-        )
-    with ext4:
-        st.markdown(
-            f"**[Finviz Quote {ticker}](https://finviz.com/quote.ashx?t={ticker})**"
+        fig.add_trace(
+            go.Scatter(
+                x=plot_df.index,
+                y=plot_df["SMA50"],
+                name="SMA50",
+                line=dict(color="#a855f7", width=1.5),
+            )
         )
 
-    st.markdown("---")
+        if support:
+            fig.add_hline(
+                y=support,
+                line_dash="dash",
+                line_color=GREEN,
+                annotation_text=f"Support ${support:.2f}",
+            )
+        if resistance:
+            fig.add_hline(
+                y=resistance,
+                line_dash="dash",
+                line_color=RED,
+                annotation_text=f"Resistance ${resistance:.2f}",
+            )
 
-    # ---- GRAFIEK ---------------------------------------------------------
-    st.markdown("### Prijsgrafiek met Moving Averages & Levels")
-    plot_df = df.tail(90)
-    fig = go.Figure()
-    fig.add_trace(
-        go.Candlestick(
-            x=plot_df.index,
-            open=plot_df["Open"],
-            high=plot_df["High"],
-            low=plot_df["Low"],
-            close=plot_df["Close"],
-            name="Prijs",
-            increasing_line_color=GREEN,
-            decreasing_line_color=RED,
+        fig.update_layout(
+            height=450,
+            xaxis_rangeslider_visible=False,
+            margin=dict(l=10, r=10, t=30, b=10),
         )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=plot_df.index,
-            y=plot_df["SMA20"],
-            name="SMA20",
-            line=dict(color="#3b82f6", width=1.5),
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=plot_df.index,
-            y=plot_df["SMA50"],
-            name="SMA50",
-            line=dict(color="#a855f7", width=1.5),
-        )
-    )
-
-    if support:
-        fig.add_hline(
-            y=support,
-            line_dash="dash",
-            line_color=GREEN,
-            annotation_text=f"Support ${support:.2f}",
-        )
-    if resistance:
-        fig.add_hline(
-            y=resistance,
-            line_dash="dash",
-            line_color=RED,
-            annotation_text=f"Resistance ${resistance:.2f}",
-        )
-
-    fig.update_layout(
-        height=450,
-        xaxis_rangeslider_visible=False,
-        margin=dict(l=10, r=10, t=30, b=10),
-    )
-    st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True)
 
 # ---------------------------------------------------------------------------
 # MULTI-TICKER SCANNER (ONDER HET DASHBOARD)
@@ -541,11 +535,11 @@ if run and ticker:
 st.markdown("---")
 st.subheader("🔍 Multi-Ticker Live Scanner")
 st.caption(
-    "Scan meerdere aandelen tegelijk om direct de **Totaal Score** en de meest bullish aandelen te ontdekken."
+    "Scan meerdere aandelen tegelijk. Klik op de knop naast een aandeel om direct de uitgebreide analyse te bekijken."
 )
 
 default_tickers = "AAPL, TSLA, NVDA, MSFT, AMD, AMZN, GOOGL, META, PLTR"
-ticker_input = st.text_area(
+scan_input = st.text_area(
     "Voer tickers in (gescheiden door komma's):",
     value=default_tickers,
     height=70,
@@ -553,26 +547,22 @@ ticker_input = st.text_area(
 
 scan_btn = st.button("🚀 Start Multi-Ticker Scan", type="secondary")
 
-if scan_btn and ticker_input:
+# Sla scan resultaten op in sessie zodat ze niet verdwijnen bij interactie
+if scan_btn and scan_input:
     tickers_to_scan = [
-        t.strip().upper() for t in ticker_input.split(",") if t.strip()
+        t.strip().upper() for t in scan_input.split(",") if t.strip()
     ]
 
-    if not tickers_to_scan:
-        st.warning("Voer minimaal 1 geldige ticker in.")
-    else:
+    if tickers_to_scan:
         st.info(f"Bezig met scannen van {len(tickers_to_scan)} aandelen...")
         progress_bar = st.progress(0)
-
         results = []
 
-        # Multi-threading voor snelle verwerking
         with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
             future_to_ticker = {
                 executor.submit(compute_stock_analysis, t): t
                 for t in tickers_to_scan
             }
-
             completed = 0
             for future in concurrent.futures.as_completed(future_to_ticker):
                 data = future.result()
@@ -582,52 +572,39 @@ if scan_btn and ticker_input:
                 progress_bar.progress(completed / len(tickers_to_scan))
 
         if results:
-            scan_df = pd.DataFrame(results)
-
-            # Sorteer op Hoogste Totaal Score eerst (Meest Bullish)
-            scan_df = scan_df.sort_values(
-                by="Totaal Score", ascending=False
-            ).reset_index(drop=True)
-
-            # Opschonen van de weergave tabel
-            display_df = scan_df[
-                [
-                    "Ticker",
-                    "Signaal",
-                    "Totaal Score",
-                    "Koers",
-                    "AI Score",
-                    "RSI",
-                    "Trend",
-                    "Details",
-                ]
-            ]
-
-            st.markdown("### 🏆 Scan Resultaten (Gesorteerd op Totaal Score)")
-
-            # Maak tabel mooi op met kleuren
-            def highlight_row(val):
-                if "BULLISH" in str(val):
-                    return "color: #16a34a; font-weight: bold;"
-                elif "BEARISH" in str(val):
-                    return "color: #dc2626; font-weight: bold;"
-                return "color: #d97706;"
-
-            st.dataframe(
-                display_df.style.map(highlight_row, subset=["Signaal"]),
-                use_container_width=True,
-                height=350,
+            st.session_state.scan_results = (
+                pd.DataFrame(results)
+                .sort_values(by="Totaal Score", ascending=False)
+                .reset_index(drop=True)
             )
 
-            # Toon direct top 3 Bullish kandidaten
-            top_bullish = scan_df[scan_df["Totaal Score"] >= 2]
-            if not top_bullish.empty:
-                st.success(
-                    f"🎯 **Meest Bullish vandaag:** {', '.join(top_bullish['Ticker'].tolist())}"
-                )
-            else:
-                st.warning(
-                    "Geen van de gescande aandelen heeft op dit moment een sterke Bullish score (≥ +2)."
-                )
-        else:
-            st.error("Kon geen data ophalen voor de ingevoerde tickers.")
+# Weergave van de resultaten indien gescand
+if "scan_results" in st.session_state:
+    scan_df = st.session_state.scan_results
+
+    st.markdown("### 🏆 Scan Resultaten (Klik op de knop om te analyseren)")
+
+    # Maak per aandeel een overzichtelijke interactieve rij
+    for idx, row in scan_df.iterrows():
+        col_t, col_sig, col_score, col_price, col_ai, col_rsi, col_act = (
+            st.columns([1.2, 1.5, 1.2, 1.2, 1.2, 1, 2])
+        )
+
+        col_t.markdown(f"**{row['Ticker']}**")
+        col_sig.markdown(row["Signaal"])
+        col_score.markdown(f"**Score: {row['Totaal Score']}**")
+        col_price.markdown(f"${row['Koers']}")
+        col_ai.markdown(row["AI Score"])
+        col_rsi.markdown(str(row["RSI"]))
+
+        # Als op de knop geklikt wordt, update de gekozen ticker en ververs pagina
+        if col_act.button(
+            f"📊 Analyseer {row['Ticker']}", key=f"btn_{row['Ticker']}_{idx}"
+        ):
+            st.session_state.selected_ticker = row["Ticker"]
+            st.rerun()
+
+        st.markdown(
+            "<hr style='margin: 4px 0px; border-top: 1px solid #eee;'>",
+            unsafe_allow_html=True,
+        )
