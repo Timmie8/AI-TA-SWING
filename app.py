@@ -6,9 +6,9 @@ Gratis databron: yfinance
 
 import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 import yfinance as yf
-import plotly.graph_objects as go
 
 # ---------------------------------------------------------------------------
 # PAGINA CONFIGURATIE
@@ -68,15 +68,19 @@ def get_option_data(ticker):
         nearest = expiries[0]
         chain = t.option_chain(nearest)
         calls, puts = chain.calls, chain.puts
-        
+
         call_vol = calls["volume"].fillna(0).sum() if "volume" in calls else 0
         put_vol = puts["volume"].fillna(0).sum() if "volume" in puts else 0
-        call_oi = calls["openInterest"].fillna(0).sum() if "openInterest" in calls else 0
-        put_oi = puts["openInterest"].fillna(0).sum() if "openInterest" in puts else 0
-        
+        call_oi = (
+            calls["openInterest"].fillna(0).sum() if "openInterest" in calls else 0
+        )
+        put_oi = (
+            puts["openInterest"].fillna(0).sum() if "openInterest" in puts else 0
+        )
+
         pcr_vol = put_vol / call_vol if call_vol > 0 else np.nan
         pcr_oi = put_oi / call_oi if call_oi > 0 else np.nan
-        
+
         return {
             "expiry": nearest,
             "pcr_volume": pcr_vol,
@@ -134,17 +138,17 @@ def calc_support_resistance(df, window=3, lookback=60):
     recent = df.tail(lookback).copy()
     highs, lows = [], []
     h, l = recent["High"].values, recent["Low"].values
-    
+
     for i in range(window, len(recent) - window):
         if h[i] == max(h[i - window : i + window + 1]):
             highs.append(h[i])
         if l[i] == min(l[i - window : i + window + 1]):
             lows.append(l[i])
-            
+
     current_price = df["Close"].iloc[-1]
     resistances = sorted([x for x in highs if x > current_price])
     supports = sorted([x for x in lows if x < current_price], reverse=True)
-    
+
     nearest_resistance = resistances[0] if resistances else None
     nearest_support = supports[0] if supports else None
     return nearest_support, nearest_resistance
@@ -169,7 +173,7 @@ def intraday_money_flow(df_intraday):
     today_df = df_intraday[df_intraday.index.date == today]
     if today_df.empty:
         today_df = df_intraday.tail(78)
-        
+
     up_vol = today_df.loc[today_df["Close"] >= today_df["Open"], "Volume"].sum()
     down_vol = today_df.loc[today_df["Close"] < today_df["Open"], "Volume"].sum()
     total = up_vol + down_vol
@@ -181,10 +185,12 @@ def analyze_3day_candles(df):
     last3 = df.tail(3)
     if len(last3) < 3:
         return "Onvoldoende data", GRAY
-        
-    colors = ["Groen" if c >= o else "Rood" for o, c in zip(last3["Open"], last3["Close"])]
+
+    colors = [
+        "Groen" if c >= o else "Rood" for o, c in zip(last3["Open"], last3["Close"])
+    ]
     closes = last3["Close"].values
-    
+
     if colors == ["Groen", "Groen", "Groen"] and closes[0] < closes[1] < closes[2]:
         return "3 opeenvolgende groene candles (sterk bullish momentum)", GREEN
     if colors == ["Rood", "Rood", "Rood"] and closes[0] > closes[1] > closes[2]:
@@ -217,11 +223,15 @@ def determine_trend(df):
 # GEBRUIKERSINTERFACE
 # ---------------------------------------------------------------------------
 st.title("📊 Swingtrade Dashboard (1-5 dagen)")
-st.caption("Gratis data via yfinance · trend, momentum, support/resistance, opties & volume.")
+st.caption(
+    "Gratis data via yfinance · trend, momentum, support/resistance, opties & volume."
+)
 
 col_input, col_btn = st.columns([3, 1])
 with col_input:
-    ticker = st.text_input("Ticker (bv. AAPL, TSLA, NVDA)", value="AAPL").upper().strip()
+    ticker = (
+        st.text_input("Ticker (bv. AAPL, TSLA, NVDA)", value="AAPL").upper().strip()
+    )
 with col_btn:
     st.write("")
     st.write("")
@@ -255,27 +265,108 @@ if run and ticker:
     price = last["Close"]
     rsi_val = last["RSI"]
     mfi_val = last["MFI"]
+    macd_bullish = last["MACD"] > last["MACD_signal"]
+
+    # ---- BEREKENING TOTAALSCORE ----------------------------------------
+    score = 0
+    reasons = []
+
+    if trend_color == GREEN:
+        score += 1
+        reasons.append("Trend bullish")
+    elif trend_color == RED:
+        score -= 1
+        reasons.append("Trend bearish")
+
+    if candle3_color == GREEN:
+        score += 1
+        reasons.append("3-daagse candles bullish")
+    elif candle3_color == RED:
+        score -= 1
+        reasons.append("3-daagse candles bearish")
+
+    if not pd.isna(rsi_val):
+        if rsi_val < 30:
+            score += 1
+            reasons.append("RSI oversold")
+        elif rsi_val > 70:
+            score -= 1
+            reasons.append("RSI overbought")
+
+    if macd_bullish:
+        score += 1
+        reasons.append("MACD bullish")
+    else:
+        score -= 1
+        reasons.append("MACD bearish")
+
+    if flow_today and flow_today["net_pct"] > 5:
+        score += 1
+        reasons.append("Positieve money flow")
+    elif flow_today and flow_today["net_pct"] < -5:
+        score -= 1
+        reasons.append("Negatieve money flow")
+
+    if score >= 2:
+        overall_color, overall_label = GREEN, "Bullish"
+    elif score <= -2:
+        overall_color, overall_label = RED, "Bearish"
+    else:
+        overall_color, overall_label = ORANGE, "Neutraal / Gemengd"
+
+    # ---- TOTAALSCORE BOVENAAN DISPLAYEN ---------------------------------
+    st.markdown("---")
+    st.subheader(f"{ticker} — Laatste koers: ${price:.2f}")
+
+    colored_box(
+        "Overall Swingtrade Signaal",
+        f"{overall_label} (Score: {score:+d})",
+        overall_color,
+        " · ".join(reasons),
+    )
+
+    st.markdown("---")
 
     # ---- RIJ 1: Basissignalen -------------------------------------------
-    st.subheader(f"{ticker} — Laatste koers: ${price:.2f}")
+    st.markdown("### Basissignalen & Momentum")
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        colored_box("Trend (SMA20/SMA50)", trend_label.split(" (")[0], trend_color, sub=trend_label)
+        colored_box(
+            "Trend (SMA20/SMA50)",
+            trend_label.split(" (")[0],
+            trend_color,
+            sub=trend_label,
+        )
     with c2:
-        colored_box("3-daagse candle status", candle3_label.split(" (")[0], candle3_color, sub=candle3_label)
+        colored_box(
+            "3-daagse candle status",
+            candle3_label.split(" (")[0],
+            candle3_color,
+            sub=candle3_label,
+        )
     with c3:
         if pd.isna(rsi_val):
             colored_box("RSI (14)", "n.v.t.", GRAY, "Onvoldoende historie")
         else:
             rsi_color = RED if rsi_val > 70 else (GREEN if rsi_val < 30 else ORANGE)
-            rsi_sub = "Overbought (>70)" if rsi_val > 70 else ("Oversold (<30)" if rsi_val < 30 else "Neutraal")
+            rsi_sub = (
+                "Overbought (>70)"
+                if rsi_val > 70
+                else ("Oversold (<30)" if rsi_val < 30 else "Neutraal")
+            )
             colored_box("RSI (14)", f"{rsi_val:.1f}", rsi_color, rsi_sub)
     with c4:
         if pd.isna(mfi_val):
-            colored_box("Money Flow Index (14d)", "n.v.t.", GRAY, "Onvoldoende historie")
+            colored_box(
+                "Money Flow Index (14d)", "n.v.t.", GRAY, "Onvoldoende historie"
+            )
         else:
             mfi_color = RED if mfi_val > 80 else (GREEN if mfi_val < 20 else ORANGE)
-            mfi_sub = "Overbought (>80)" if mfi_val > 80 else ("Oversold (<20)" if mfi_val < 20 else "Neutraal")
+            mfi_sub = (
+                "Overbought (>80)"
+                if mfi_val > 80
+                else ("Oversold (<20)" if mfi_val < 20 else "Neutraal")
+            )
             colored_box("Money Flow Index (14d)", f"{mfi_val:.1f}", mfi_color, mfi_sub)
 
     # ---- RIJ 2: Technische niveaus & MACD --------------------------------
@@ -288,12 +379,13 @@ if run and ticker:
             sr_text += f"Resistance: ${resistance:.2f}"
         colored_box(
             "Support / Resistance",
-            f"${support:.2f} — ${resistance:.2f}" if support and resistance else "n.v.t.",
+            f"${support:.2f} — ${resistance:.2f}"
+            if support and resistance
+            else "n.v.t.",
             GRAY,
             sr_text or "Geen duidelijke swingpunten",
         )
     with c6:
-        macd_bullish = last["MACD"] > last["MACD_signal"]
         macd_color = GREEN if macd_bullish else RED
         colored_box(
             "MACD Status",
@@ -307,7 +399,9 @@ if run and ticker:
         else:
             net = flow_today["net_pct"]
             flow_color = GREEN if net > 5 else (RED if net < -5 else ORANGE)
-            flow_label = "Positief" if net > 5 else ("Negatief" if net < -5 else "Neutraal")
+            flow_label = (
+                "Positief" if net > 5 else ("Negatief" if net < -5 else "Neutraal")
+            )
             colored_box(
                 "1-dag Money Flow (intraday)",
                 flow_label,
@@ -327,7 +421,11 @@ if run and ticker:
                 colored_box("Put/Call Ratio", "n.v.t.", GRAY, "Geen volume vandaag")
             else:
                 pcr_color = GREEN if pcr < 0.7 else (RED if pcr > 1.0 else ORANGE)
-                pcr_label = "Bullish (<0.7)" if pcr < 0.7 else ("Bearish (>1.0)" if pcr > 1.0 else "Neutraal")
+                pcr_label = (
+                    "Bullish (<0.7)"
+                    if pcr < 0.7
+                    else ("Bearish (>1.0)" if pcr > 1.0 else "Neutraal")
+                )
                 colored_box(
                     "Put/Call Ratio (Volume)",
                     f"{pcr:.2f} — {pcr_label}",
@@ -341,12 +439,14 @@ if run and ticker:
         else:
             spf_pct = spf * 100
             short_color = RED if spf_pct > 15 else (ORANGE if spf_pct > 5 else GREEN)
-            short_label = "Hoog" if spf_pct > 15 else ("Gemiddeld" if spf_pct > 5 else "Laag")
+            short_label = (
+                "Hoog" if spf_pct > 15 else ("Gemiddeld" if spf_pct > 5 else "Laag")
+            )
             colored_box(
                 "Short % of Float",
                 f"{spf_pct:.1f}% — {short_label}",
                 short_color,
-                "Settlementdata (ververtraagde update)",
+                "Settlementdata (vertraagde update)",
             )
 
     # ---- GRAFIEK ---------------------------------------------------------
@@ -365,43 +465,44 @@ if run and ticker:
             decreasing_line_color=RED,
         )
     )
-    fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df["SMA20"], name="SMA20", line=dict(color="#3b82f6", width=1.5)))
-    fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df["SMA50"], name="SMA50", line=dict(color="#a855f7", width=1.5)))
-    
+    fig.add_trace(
+        go.Scatter(
+            x=plot_df.index,
+            y=plot_df["SMA20"],
+            name="SMA20",
+            line=dict(color="#3b82f6", width=1.5),
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=plot_df.index,
+            y=plot_df["SMA50"],
+            name="SMA50",
+            line=dict(color="#a855f7", width=1.5),
+        )
+    )
+
     if support:
-        fig.add_hline(y=support, line_dash="dash", line_color=GREEN, annotation_text=f"Support ${support:.2f}")
+        fig.add_hline(
+            y=support,
+            line_dash="dash",
+            line_color=GREEN,
+            annotation_text=f"Support ${support:.2f}",
+        )
     if resistance:
-        fig.add_hline(y=resistance, line_dash="dash", line_color=RED, annotation_text=f"Resistance ${resistance:.2f}")
-        
-    fig.update_layout(height=500, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=30, b=10))
+        fig.add_hline(
+            y=resistance,
+            line_dash="dash",
+            line_color=RED,
+            annotation_text=f"Resistance ${resistance:.2f}",
+        )
+
+    fig.update_layout(
+        height=500,
+        xaxis_rangeslider_visible=False,
+        margin=dict(l=10, r=10, t=30, b=10),
+    )
     st.plotly_chart(fig, use_container_width=True)
-
-    # ---- SAMENVATTING ---------------------------------------------------
-    st.markdown("### Samenvattend swingtrade-signaal")
-    score = 0
-    reasons = []
-    
-    if trend_color == GREEN: score += 1; reasons.append("Trend bullish")
-    elif trend_color == RED: score -= 1; reasons.append("Trend bearish")
-    
-    if candle3_color == GREEN: score += 1; reasons.append("3-daagse candles bullish")
-    elif candle3_color == RED: score -= 1; reasons.append("3-daagse candles bearish")
-    
-    if not pd.isna(rsi_val):
-        if rsi_val < 30: score += 1; reasons.append("RSI oversold")
-        elif rsi_val > 70: score -= 1; reasons.append("RSI overbought")
-        
-    if macd_bullish: score += 1; reasons.append("MACD bullish")
-    else: score -= 1; reasons.append("MACD bearish")
-    
-    if flow_today and flow_today["net_pct"] > 5: score += 1; reasons.append("Positieve money flow")
-    elif flow_today and flow_today["net_pct"] < -5: score -= 1; reasons.append("Negatieve money flow")
-
-    if score >= 2: overall_color, overall_label = GREEN, "Bullish"
-    elif score <= -2: overall_color, overall_label = RED, "Bearish"
-    else: overall_color, overall_label = ORANGE, "Neutraal / Gemengd"
-
-    colored_box("Overall Signaal", f"{overall_label} (score: {score:+d})", overall_color, " · ".join(reasons))
 
 else:
     st.info("Vul een ticker in en klik op 'Analyseer' om de analyse te starten.")
