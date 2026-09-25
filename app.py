@@ -1,9 +1,10 @@
 """
 Swingtrade Dashboard (1-5 dagen horizon)
 =========================================
-Gratis databron: yfinance
+Gratis databron: yfinance & AI News Sentiment Scraping
 """
 
+import re
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -36,7 +37,7 @@ def colored_box(label, value, color, sub=""):
 
 
 # ---------------------------------------------------------------------------
-# DATA OPHALEN
+# DATA OPHALEN & AI SENTIMENT SCORE
 # ---------------------------------------------------------------------------
 @st.cache_data(ttl=300)
 def get_daily_data(ticker, period="6mo"):
@@ -59,6 +60,57 @@ def get_intraday_data(ticker, period="5d", interval="5m"):
 
 
 @st.cache_data(ttl=900)
+def get_ai_news_sentiment_score(ticker):
+    """
+    Gratis AI/Sentiment analyser: haalt recent nieuws op via yfinance
+    en berekent een AI Sentiment Score (1-10) op basis van trefwoord-analyse.
+    """
+    try:
+        t = yf.Ticker(ticker)
+        news = t.news
+        if not news:
+            return 5.0, "Geen recent nieuws gevonden (neutraal)"
+
+        pos_words = {
+            "bull", "bullish", "growth", "record", "beat", "surge", "gain", "buy",
+            "upgrade", "high", "profit", "positive", "outperform", "soar", "rally"
+        }
+        neg_words = {
+            "bear", "bearish", "drop", "fall", "miss", "plunge", "loss", "sell",
+            "downgrade", "low", "risk", "negative", "underperform", "sink", "slump"
+        }
+
+        total_pos = 0
+        total_neg = 0
+        count = 0
+
+        for item in news[:10]:  # Analyseer de laatste 10 artikelen
+            title = item.get("title", "").lower()
+            words = set(re.findall(r"\b\w+\b", title))
+            
+            pos_count = len(words.intersection(pos_words))
+            neg_count = len(words.intersection(neg_words))
+            
+            total_pos += pos_count
+            total_neg += neg_count
+            count += 1
+
+        if total_pos + total_neg == 0:
+            return 5.5, f"Nieuwsanalyse ({count} artikelen): Neutraal sentiment"
+
+        # Bereken score op schaal van 1 tot 10
+        ratio = total_pos / (total_pos + total_neg)
+        ai_score = round(1 + (ratio * 9), 1)
+
+        sentiment_label = "Bullish" if ai_score >= 6.5 else ("Bearish" if ai_score <= 4.0 else "Neutraal")
+        subtext = f"Nieuwsanalyse ({count} koppen): {total_pos} positieve vs {total_neg} negatieve signalen ({sentiment_label})"
+        
+        return ai_score, subtext
+    except Exception:
+        return 5.0, "Fout bij ophalen van nieuws data"
+
+
+@st.cache_data(ttl=900)
 def get_option_data(ticker):
     try:
         t = yf.Ticker(ticker)
@@ -71,22 +123,12 @@ def get_option_data(ticker):
 
         call_vol = calls["volume"].fillna(0).sum() if "volume" in calls else 0
         put_vol = puts["volume"].fillna(0).sum() if "volume" in puts else 0
-        call_oi = (
-            calls["openInterest"].fillna(0).sum() if "openInterest" in calls else 0
-        )
-        put_oi = (
-            puts["openInterest"].fillna(0).sum() if "openInterest" in puts else 0
-        )
 
         pcr_vol = put_vol / call_vol if call_vol > 0 else np.nan
-        pcr_oi = put_oi / call_oi if call_oi > 0 else np.nan
 
         return {
             "expiry": nearest,
             "pcr_volume": pcr_vol,
-            "pcr_oi": pcr_oi,
-            "call_volume": call_vol,
-            "put_volume": put_vol,
         }
     except Exception:
         return None
@@ -99,8 +141,6 @@ def get_short_data(ticker):
         info = t.info
         return {
             "short_pct_float": info.get("shortPercentOfFloat"),
-            "short_ratio": info.get("shortRatio"),
-            "shares_short": info.get("sharesShort"),
         }
     except Exception:
         return {}
@@ -224,7 +264,7 @@ def determine_trend(df):
 # ---------------------------------------------------------------------------
 st.title("📊 Swingtrade Dashboard (1-5 dagen)")
 st.caption(
-    "Gratis data via yfinance · trend, momentum, support/resistance, opties & volume."
+    "Gratis data via yfinance · trend, momentum, AI-nieuws sentiment, opties & volume."
 )
 
 col_input, col_btn = st.columns([3, 1])
@@ -238,9 +278,10 @@ with col_btn:
     run = st.button("Analyseer", type="primary", use_container_width=True)
 
 if run and ticker:
-    with st.spinner(f"Data ophalen voor {ticker}..."):
+    with st.spinner(f"Data & AI Sentiment ophalen voor {ticker}..."):
         df = get_daily_data(ticker)
         df_intraday = get_intraday_data(ticker)
+        ai_score, ai_subtext = get_ai_news_sentiment_score(ticker)
         option_data = get_option_data(ticker)
         short_data = get_short_data(ticker)
 
@@ -267,9 +308,17 @@ if run and ticker:
     mfi_val = last["MFI"]
     macd_bullish = last["MACD"] > last["MACD_signal"]
 
-    # ---- BEREKENING TOTAALSCORE ----------------------------------------
+    # ---- BEREKENING TOTAALSCORE (Inclusief AI Score) --------------------
     score = 0
     reasons = []
+
+    # AI Score weging
+    if ai_score >= 6.5:
+        score += 1
+        reasons.append(f"AI Nieuws Score Positief ({ai_score}/10)")
+    elif ai_score <= 4.0:
+        score -= 1
+        reasons.append(f"AI Nieuws Score Negatief ({ai_score}/10)")
 
     if trend_color == GREEN:
         score += 1
@@ -327,9 +376,12 @@ if run and ticker:
 
     st.markdown("---")
 
-    # ---- RIJ 1: Basissignalen -------------------------------------------
-    st.markdown("### Basissignalen & Momentum")
-    c1, c2, c3, c4 = st.columns(4)
+    # ---- RIJ 1: AI Score & Trend ----------------------------------------
+    st.markdown("### AI Sentiment & Basissignalen")
+    c0, c1, c2, c3 = st.columns(4)
+    with c0:
+        ai_color = GREEN if ai_score >= 6.5 else (RED if ai_score <= 4.0 else ORANGE)
+        colored_box("AI News Sentiment Score", f"{ai_score} / 10", ai_color, ai_subtext)
     with c1:
         colored_box(
             "Trend (SMA20/SMA50)",
@@ -355,11 +407,12 @@ if run and ticker:
                 else ("Oversold (<30)" if rsi_val < 30 else "Neutraal")
             )
             colored_box("RSI (14)", f"{rsi_val:.1f}", rsi_color, rsi_sub)
+
+    # ---- RIJ 2: Technische niveaus & MACD --------------------------------
+    c4, c5, c6, c7 = st.columns(4)
     with c4:
         if pd.isna(mfi_val):
-            colored_box(
-                "Money Flow Index (14d)", "n.v.t.", GRAY, "Onvoldoende historie"
-            )
+            colored_box("Money Flow Index (14d)", "n.v.t.", GRAY, "Onvoldoende historie")
         else:
             mfi_color = RED if mfi_val > 80 else (GREEN if mfi_val < 20 else ORANGE)
             mfi_sub = (
@@ -368,9 +421,6 @@ if run and ticker:
                 else ("Oversold (<20)" if mfi_val < 20 else "Neutraal")
             )
             colored_box("Money Flow Index (14d)", f"{mfi_val:.1f}", mfi_color, mfi_sub)
-
-    # ---- RIJ 2: Technische niveaus & MACD --------------------------------
-    c5, c6, c7 = st.columns(3)
     with c5:
         sr_text = ""
         if support:
